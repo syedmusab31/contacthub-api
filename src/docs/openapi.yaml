@@ -1,0 +1,886 @@
+openapi: 3.0.3
+info:
+  title: ContactHub API
+  version: 2.0.0
+  description: |
+    REST API for managing personal contacts.
+
+    Every successful response is wrapped as `{ "success": true, "data": ..., "meta"?: ... }`.
+    Errors are returned as `{ "success": false, "error": { "code", "message", "details"? } }`.
+
+    Authenticate with `Authorization: Bearer <accessToken>`. Access tokens are short-lived;
+    exchange the refresh token at `POST /auth/refresh` for a new pair.
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: Users
+  - name: Contacts
+  - name: Sharing
+  - name: Trash
+  - name: Import / Export
+  - name: Groups
+  - name: Audit
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-f0-9]{24}$' }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    NoContent:
+      description: Done, no body
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  location: { type: string }
+                  path: { type: string }
+                  message: { type: string }
+
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string, format: email }
+        isEmailVerified: { type: boolean }
+        avatar:
+          type: object
+          properties: { url: { type: string } }
+        preferences:
+          type: object
+          properties:
+            birthdayReminders: { type: boolean }
+            timezone: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Session:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        tokenType: { type: string, example: Bearer }
+        expiresIn: { type: string, example: 15m }
+
+    LabeledValue:
+      type: object
+      required: [value]
+      properties:
+        label: { type: string, example: work }
+        value: { type: string }
+
+    Address:
+      type: object
+      properties:
+        label: { type: string }
+        street: { type: string }
+        city: { type: string }
+        state: { type: string }
+        postalCode: { type: string }
+        country: { type: string }
+
+    ContactInput:
+      type: object
+      properties:
+        name: { type: string, maxLength: 150 }
+        company: { type: string }
+        jobTitle: { type: string }
+        emails:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/LabeledValue' }
+        phones:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/LabeledValue' }
+        addresses:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/Address' }
+        socialLinks:
+          type: array
+          items:
+            type: object
+            properties:
+              platform: { type: string, example: linkedin }
+              url: { type: string, format: uri }
+        website: { type: string, format: uri }
+        birthday: { type: string, format: date, nullable: true }
+        notes: { type: string, maxLength: 5000 }
+        tags: { type: array, items: { type: string } }
+        groups: { type: array, items: { type: string } }
+        isFavorite: { type: boolean }
+        email: { type: string, description: 'Legacy shortcut, added to `emails`' }
+        phone: { type: string, description: 'Legacy shortcut, added to `phones`' }
+
+    Contact:
+      allOf:
+        - $ref: '#/components/schemas/ContactInput'
+        - type: object
+          properties:
+            id: { type: string }
+            owner: { type: string }
+            avatar:
+              type: object
+              properties: { url: { type: string } }
+            access: { type: string, enum: [owner, editor, viewer] }
+            sharedWith:
+              type: array
+              items:
+                type: object
+                properties:
+                  user: { type: string }
+                  role: { type: string, enum: [viewer, editor] }
+                  sharedAt: { type: string, format: date-time }
+            deletedAt: { type: string, format: date-time, nullable: true }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+
+    Group:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        color: { type: string, example: '#2563eb' }
+        contactCount: { type: integer }
+
+    AuditLog:
+      type: object
+      properties:
+        id: { type: string }
+        actor: { type: string }
+        action: { type: string, example: contact.updated }
+        entityType: { type: string, enum: [user, contact, group] }
+        entityId: { type: string }
+        changes:
+          type: object
+          additionalProperties:
+            type: object
+            properties: { from: {}, to: {} }
+        metadata: { type: object }
+        createdAt: { type: string, format: date-time }
+
+    FileUpload:
+      type: object
+      required: [file]
+      properties:
+        file: { type: string, format: binary }
+
+paths:
+  # ---------------------------------------------------------------- Auth
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password:
+                  type: string
+                  description: 8+ chars with upper, lower, number and special character
+      responses:
+        '201':
+          description: Account created. A verification email is sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Session' } }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { data: { $ref: '#/components/schemas/Session' } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/google:
+    post:
+      tags: [Auth]
+      summary: Sign in or sign up with a Google ID token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idToken]
+              properties: { idToken: { type: string } }
+      responses:
+        '200': { description: Logged in }
+        '201': { description: Account created }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { description: GOOGLE_CLIENT_ID is not configured }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token
+      description: Reads `refreshToken` from the body or the httpOnly cookie. Reusing an old token revokes the whole session family.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { refreshToken: { type: string } }
+      responses:
+        '200': { description: New token pair }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current refresh token
+      security: []
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  /auth/logout-all:
+    post:
+      tags: [Auth]
+      summary: Revoke every session of the current user
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Confirm an email address
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties: { token: { type: string } }
+      responses:
+        '200': { description: Verified }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Send a new verification email
+      responses:
+        '200': { description: Sent }
+        '400': { description: Already verified }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset email
+      description: Always returns 200 so it cannot be used to find out which emails are registered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties: { email: { type: string } }
+      responses:
+        '200': { description: Accepted }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Set a new password with a reset token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: Password updated, all sessions revoked }
+        '400': { $ref: '#/components/responses/Error' }
+
+  # ---------------------------------------------------------------- Users
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Current user
+      responses:
+        '200': { description: The user }
+    patch:
+      tags: [Users]
+      summary: Update profile and preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                preferences:
+                  type: object
+                  properties:
+                    birthdayReminders: { type: boolean }
+                    timezone: { type: string }
+      responses:
+        '200': { description: Updated user }
+    delete:
+      tags: [Users]
+      summary: Delete the account and all of its data
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string }
+                confirm:
+                  type: string
+                  enum: [DELETE]
+                  description: Required instead of password for Google-only accounts
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /users/me/password:
+    patch:
+      tags: [Users]
+      summary: Change password
+      description: Signs out every other session and returns a new token pair.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string }
+      responses:
+        '200': { description: New session }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /users/me/avatar:
+    put:
+      tags: [Users]
+      summary: Upload a profile photo (JPEG, PNG or WebP, max 2 MB)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/FileUpload' }
+      responses:
+        '200': { description: Updated user }
+        '413': { description: File too large }
+        '415': { description: Unsupported type }
+    delete:
+      tags: [Users]
+      summary: Remove the profile photo
+      responses:
+        '200': { description: Updated user }
+
+  # ---------------------------------------------------------------- Contacts
+  /contacts:
+    get:
+      tags: [Contacts]
+      summary: List contacts
+      description: Favourites first, then by the chosen sort.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - {
+            name: q,
+            in: query,
+            schema: { type: string },
+            description: 'Search name, company, email, phone, tag',
+          }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: group, in: query, schema: { type: string } }
+        - { name: favorite, in: query, schema: { type: boolean } }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [name, -name, createdAt, -createdAt, updatedAt, -updatedAt, birthday]
+            default: name
+      responses:
+        '200':
+          description: A page of contacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Contact' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+    post:
+      tags: [Contacts]
+      summary: Create a contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ContactInput'
+                - required: [name]
+      responses:
+        '201':
+          description: Created. `possibleDuplicates` lists existing contacts with the same email or phone.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      contact: { $ref: '#/components/schemas/Contact' }
+                      possibleDuplicates:
+                        type: array
+                        items:
+                          type: object
+                          properties: { id: { type: string }, name: { type: string } }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /contacts/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Contacts]
+      summary: Get a contact (owned or shared with you)
+      responses:
+        '200': { description: The contact }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Contacts]
+      summary: Update a contact
+      description: Editors of a shared contact cannot change `groups` or `isFavorite`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactInput' }
+      responses:
+        '200': { description: Updated contact }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Contacts]
+      summary: Move a contact to the trash
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  /contacts/{id}/avatar:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    put:
+      tags: [Contacts]
+      summary: Upload a contact photo
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/FileUpload' }
+      responses:
+        '200': { description: Updated contact }
+    delete:
+      tags: [Contacts]
+      summary: Remove the contact photo
+      responses:
+        '200': { description: Updated contact }
+
+  /contacts/{id}/history:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Limit'
+    get:
+      tags: [Contacts]
+      summary: Change history of a contact (owner only)
+      responses:
+        '200':
+          description: Audit entries, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+
+  /contacts/tags:
+    get:
+      tags: [Contacts]
+      summary: All tags in use, with counts
+      responses:
+        '200': { description: '[{ tag, count }]' }
+
+  /contacts/birthdays/upcoming:
+    get:
+      tags: [Contacts]
+      summary: Birthdays in the next N days
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 366, default: 30 } }
+      responses:
+        '200': { description: 'Contacts with nextBirthday, daysUntil and turningAge' }
+
+  /contacts/duplicates:
+    get:
+      tags: [Contacts]
+      summary: Find likely duplicates
+      description: Contacts are clustered when they share an email, a phone number or the exact same name.
+      responses:
+        '200': { description: '[{ matchedOn: string[], contacts: Contact[] }]' }
+
+  /contacts/merge:
+    post:
+      tags: [Contacts]
+      summary: Merge duplicates into one contact
+      description: Lists are combined, empty fields are filled in, notes are joined. Duplicates are moved to the trash.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [primaryId, duplicateIds]
+              properties:
+                primaryId: { type: string }
+                duplicateIds: { type: array, items: { type: string }, maxItems: 20 }
+      responses:
+        '200': { description: The merged contact }
+
+  # ---------------------------------------------------------------- Sharing
+  /contacts/shared:
+    get:
+      tags: [Sharing]
+      summary: Contacts other people shared with you
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: 'Contacts, each with an `owner` summary' }
+
+  /contacts/{id}/share:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Sharing]
+      summary: Share a contact with another user (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+                role: { type: string, enum: [viewer, editor], default: viewer }
+      responses:
+        '200': { description: Current list of people with access }
+        '404': { description: No user with that email }
+
+  /contacts/{id}/share/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/Id'
+      - { name: userId, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [Sharing]
+      summary: Remove someone's access (or leave a contact shared with you)
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  # ---------------------------------------------------------------- Trash
+  /contacts/trash:
+    get:
+      tags: [Trash]
+      summary: Contacts in the trash
+      description: Each item has `purgeAt`, when it will be deleted for good.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: A page of deleted contacts }
+    delete:
+      tags: [Trash]
+      summary: Empty the trash
+      responses:
+        '200': { description: '{ deletedCount }' }
+
+  /contacts/trash/{id}/restore:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    post:
+      tags: [Trash]
+      summary: Restore a contact
+      responses:
+        '200': { description: Restored contact }
+
+  /contacts/trash/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    delete:
+      tags: [Trash]
+      summary: Delete a contact permanently
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  # ---------------------------------------------------------------- Import / Export
+  /contacts/export:
+    get:
+      tags: [Import / Export]
+      summary: Download contacts as CSV or vCard
+      parameters:
+        - { name: format, in: query, schema: { type: string, enum: [csv, vcf], default: csv } }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: group, in: query, schema: { type: string } }
+        - { name: favorite, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: File download
+          content:
+            text/csv: {}
+            text/vcard: {}
+
+  /contacts/import:
+    post:
+      tags: [Import / Export]
+      summary: Import a CSV or vCard file (max 5 MB, 5000 contacts)
+      parameters:
+        - {
+            name: format,
+            in: query,
+            schema: { type: string, enum: [csv, vcf] },
+            description: Detected from the file when omitted,
+          }
+        - { name: skipDuplicates, in: query, schema: { type: boolean, default: true } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/FileUpload' }
+      responses:
+        '200':
+          description: Import report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      format: { type: string }
+                      total: { type: integer }
+                      imported: { type: integer }
+                      skipped: { type: integer }
+                      failed: { type: integer }
+                      errors:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            row: { type: integer }
+                            messages: { type: array, items: { type: string } }
+
+  # ---------------------------------------------------------------- Groups
+  /groups:
+    get:
+      tags: [Groups]
+      summary: List groups with contact counts
+      responses:
+        '200':
+          description: Groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Group' } }
+    post:
+      tags: [Groups]
+      summary: Create a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                color: { type: string }
+      responses:
+        '201': { description: Created group }
+        '409': { description: A group with that name exists }
+
+  /groups/{id}:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Groups]
+      summary: Get a group
+      responses:
+        '200': { description: The group }
+    patch:
+      tags: [Groups]
+      summary: Update a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                color: { type: string }
+      responses:
+        '200': { description: Updated group }
+    delete:
+      tags: [Groups]
+      summary: Delete a group (its contacts are kept)
+      responses:
+        '204': { $ref: '#/components/responses/NoContent' }
+
+  /groups/{id}/contacts:
+    parameters: [{ $ref: '#/components/parameters/Id' }]
+    get:
+      tags: [Groups]
+      summary: Contacts in the group
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200': { description: A page of contacts }
+    post:
+      tags: [Groups]
+      summary: Add contacts to the group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contactIds]
+              properties:
+                contactIds: { type: array, items: { type: string } }
+      responses:
+        '200': { description: '{ matched, added }' }
+    delete:
+      tags: [Groups]
+      summary: Remove contacts from the group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contactIds]
+              properties:
+                contactIds: { type: array, items: { type: string } }
+      responses:
+        '200': { description: '{ removed }' }
+
+  # ---------------------------------------------------------------- Audit
+  /audit-logs:
+    get:
+      tags: [Audit]
+      summary: Your own activity log
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - { name: entityType, in: query, schema: { type: string, enum: [user, contact, group] } }
+        - { name: action, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Entries, newest first (kept for one year)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
